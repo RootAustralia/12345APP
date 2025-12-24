@@ -1,0 +1,206 @@
+name: build-windows
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  PARTNER_CENTER_API: https://manage.devcenter.microsoft.com/v1.0/my/applications
+  PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+
+permissions:
+  contents: write
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        required: true
+        type: string
+        description: 'App name'
+      pkg:
+        required: true
+        type: string
+        description: 'Package name'
+      version:
+        required: true
+        type: string
+        description: 'Version to build'
+
+jobs:
+  build-windows-app:
+    runs-on: windows-latest
+    outputs:
+      submission-success: ${{ steps.publish.outcome == 'success' }}
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          token: ${{ secrets.ORG_TOKEN }}
+
+      - uses: microsoft/microsoft-store-apppublisher@v1.2
+      - run: msstore reconfigure --tenantId ${{ secrets.PARTNER_TENANT }} --sellerId ${{ secrets.PARTNER_SELLER }} --clientId ${{ secrets.PARTNER_CLIENT }} --clientSecret ${{ secrets.PARTNER_SECRET }}
+
+      - name: Configure the Microsoft Store CLI
+        shell: pwsh
+        run: |
+          Install-Module -Name StoreBroker -Force
+
+      - name: Clean build artifacts
+        shell: bash
+        run: |
+          rm -rf build windows/.Dart_tool .dart_tool
+          echo "Cleaned build artifacts for fresh amd64 build"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\Pub\Cache
+            ${{ env.FLUTTER_HOME }}\.pub-cache
+          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pub-
+
+      - name: Set build environment
+        shell: bash
+        run: |
+          set -xeuo pipefail
+          echo "BUILD_VERSION=${{ inputs.version }}" >> "${GITHUB_ENV}"
+
+      - name: Install Flutter dependencies
+        shell: bash
+        run: |
+          flutter pub get
+
+      - name: Check Flutter version
+        shell: bash
+        run: |
+          flutter --version
+
+      - name: Enable Windows desktop
+        shell: bash
+        run: |
+          flutter config --enable-windows-desktop
+
+      - name: Build Windows app
+        shell: bash
+        run: |
+          set -xeuo pipefail
+
+          echo "Building ${{ inputs.name }} ${{ inputs.version }} (Release Mode)"
+
+          flutter build windows --release \
+            --obfuscate \
+            --split-debug-info=debug-info/windows-amd64 \
+            --suppress-analytics \
+            --no-tree-shake-icons
+
+          echo "Verifying build output:"
+          ls -lh build/windows
+          ls -lh build/windows/x64/runner/Release/
+
+      - name: Compose MSIX env
+        shell: bash
+        run: |
+          set -xeuo pipefail
+
+          VERSION="${{ inputs.version }}"
+          VERSION="${VERSION#v}"
+          IFS='.' read -r a b c <<< "$VERSION"
+          BUILD_NUMBER=0
+          MSIX_VERSION="${a}.${b}.${c}.${BUILD_NUMBER}"
+          MSIX_FILENAME="${{ inputs.name }}-windows-amd64-${{ inputs.version }}-store.msix"
+
+          echo "Input version: ${{ inputs.version }}"
+          echo "MSIX version: ${MSIX_VERSION}"
+          echo "MSIX filename: ${MSIX_FILENAME}"
+
+          echo "MSIX_VERSION=${MSIX_VERSION}" >> "${GITHUB_ENV}"
+          echo "MSIX_FILENAME=${MSIX_FILENAME}" >> "${GITHUB_ENV}"
+
+      - name: Build MSIX package(Store)
+        shell: bash
+        run: |
+          set -xeuo pipefail
+
+          echo "Building Store MSIX package for ${{ inputs.name }} ${{ inputs.version }}"
+          echo "Using MSIX version: ${MSIX_VERSION}"
+
+          DISPLAY_NAME="${{ secrets.PARTNER_APP }}"
+          DISPLAY_NAME="${DISPLAY_NAME##*.}"
+
+          dart run msix:create \
+            -e "internetClient, privateNetworkClientServer" \
+            -d "${DISPLAY_NAME}" \
+            -l "assets/logo.png" \
+            -u "${{ secrets.PARTNER_COMPANY }}" \
+            -i "${{ secrets.PARTNER_APP }}" \
+            --version "${MSIX_VERSION}" \
+            --publisher "${{ secrets.PARTNER_CN }}" \
+            --store true \
+            --trim-logo false \
+            --sign-msix false
+
+      - name: Move Store MSIX
+        shell: pwsh
+        run: |
+          $msixPath = "$env:MSIX_FILENAME"
+          Move-Item "build/windows/x64/runner/Release/*.msix" $msixPath
+
+          Write-Host "Store package ready:"
+          Get-Item $msixPath | Select-Object Name, Length
+
+      - name: Publish to Store
+        id: publish
+        continue-on-error: true
+        run: msstore publish '${{ env.MSIX_FILENAME }}' -id ${{ secrets.PARTNER_STORE }}
+
+      - name: Upload MSIX to release (Store publish failed)
+        if: steps.publish.outcome == 'failure'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: Release ${{ inputs.version }}
+          draft: false
+          prerelease: false
+          overwrite_files: true
+          files: |
+            ${{ env.MSIX_FILENAME }}
+          body: |
+            ## Windows Application for ${{ inputs.version }}
+
+            ### Build Configuration
+            - **Platform**: Windows
+            - **Architecture**: amd64
+            - **Build Type**: Release (Obfuscated)
+            - **Code Obfuscation**: Enabled
+            - **Debug Symbols**: Available as workflow artifact
+
+            ### Installation
+            Download and double-click the MSIX file to install the application
+
+            > **Note**: Store publish failed. This is the unsigned MSIX package.
+
+  upload-to-release:
+    needs: build-windows-app
+    if: needs.build-windows-app.outputs.submission-success == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout private repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          token: ${{ secrets.ORG_TOKEN }}
+
+      - name: Upload store MSIX to release
+        uses: JasonWei512/Upload-Microsoft-Store-MSIX-Package-to-GitHub-Release@v1
+        continue-on-error: true
+        with:
+          store-id: ${{ secrets.PARTNER_STORE }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          asset-name-pattern: ${{ inputs.name }}_{version}_{arch}
