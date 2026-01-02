@@ -186,21 +186,3 @@ jobs:
 
             > **Note**: Store publish failed. This is the unsigned MSIX package.
 
-  upload-to-release:
-    needs: build-windows-app
-    if: needs.build-windows-app.outputs.submission-success == 'true'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout private repository
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ env.PRIVATE_REPO }}
-          token: ${{ secrets.ORG_TOKEN }}
-
-      - name: Upload store MSIX to release
-        uses: JasonWei512/Upload-Microsoft-Store-MSIX-Package-to-GitHub-Release@v1
-        continue-on-error: true
-        with:
-          store-id: ${{ secrets.PARTNER_STORE }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          asset-name-pattern: ${{ inputs.name }}_{version}_{arch}
