@@ -56,6 +56,7 @@ jobs:
             ${{ runner.os }}-pub-
 
       - name: Set build environment
+        id: build-env
         run: |
           set -xeuo pipefail
 
@@ -67,6 +68,8 @@ jobs:
 
           sed -i "s/^version: .*/version: ${VERSION}+${BUILD_NUMBER}/" pubspec.yaml
           echo "Updated pubspec.yaml version to: ${VERSION}+${BUILD_NUMBER}"
+
+          echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
 
       - name: Install Flutter dependencies
         run: |
@@ -87,7 +90,7 @@ jobs:
           storeFile=${{ secrets.PKCS12_NAME }}-keystore.jks
           EOF
 
-      - name: Build Android APK and App Bundle
+      - name: Build Android App Bundle
         run: |
           set -xeuo pipefail
 
@@ -95,17 +98,6 @@ jobs:
           rm -rf .dart_tool android/.gradle
           flutter gen-l10n
           flutter pub run flutter_launcher_icons
-
-          echo "Building APK..."
-          flutter build apk --release \
-              --obfuscate \
-              --split-debug-info=debug-info/android \
-              --suppress-analytics \
-              --no-tree-shake-icons
-
-          echo "Renaming APK for release..."
-          mv build/app/outputs/flutter-apk/app-release.apk "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
-          echo "Release APK created: ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
 
           echo "Building App Bundle..."
           flutter build appbundle --release \
@@ -133,7 +125,92 @@ jobs:
           track: production
           status: completed
 
-      - name: Upload APK to GitHub release
+      - name: Download signed APK from Google Play
+        id: download-apk
+        if: steps.publish.outcome == 'success'
+        run: |
+          set -xeuo pipefail
+
+          PACKAGE_NAME="${{ inputs.pkg }}"
+          VERSION_CODE="${{ steps.build-env.outputs.build_number }}"
+
+          base64url() {
+            openssl base64 -e -A | tr '+/' '-_' | tr -d '='
+          }
+
+          CLIENT_EMAIL=$(jq -r '.client_email' service-account.json)
+          jq -r '.private_key' service-account.json > private_key.pem
+
+          JWT_HEADER=$(echo -n '{"alg":"RS256","typ":"JWT"}' | base64url)
+
+          NOW=$(date +%s)
+          EXP=$((NOW + 3600))
+          JWT_CLAIMS=$(cat << EOF | tr -d '\n' | base64url
+          {"iss":"${CLIENT_EMAIL}","scope":"https://www.googleapis.com/auth/androidpublisher","aud":"https://oauth2.googleapis.com/token","iat":${NOW},"exp":${EXP}}
+          EOF
+          )
+
+          UNSIGNED="${JWT_HEADER}.${JWT_CLAIMS}"
+          SIGNATURE=$(echo -n "${UNSIGNED}" | openssl dgst -sha256 -sign private_key.pem | base64url)
+
+          JWT="${UNSIGNED}.${SIGNATURE}"
+
+          rm -f private_key.pem
+
+          echo "Requesting access token..."
+          TOKEN_RESPONSE=$(curl -s -X POST "https://oauth2.googleapis.com/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${JWT}")
+
+          ACCESS_TOKEN=$(echo "${TOKEN_RESPONSE}" | jq -r '.access_token // empty')
+
+          if [ -z "${ACCESS_TOKEN}" ]; then
+            echo "Error: Failed to obtain access token"
+            echo "Response: ${TOKEN_RESPONSE}"
+            echo "apk_downloaded=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Access token obtained successfully"
+          echo "Fetching generated APKs for version code ${VERSION_CODE}..."
+          GENERATED_APKS=$(curl -s -X GET \
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE_NAME}/generatedApks/${VERSION_CODE}" \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Accept: application/json")
+
+          echo "API Response: ${GENERATED_APKS}"
+          DOWNLOAD_ID=$(echo "${GENERATED_APKS}" | jq -r '.generatedApks[0].generatedUniversalApk.downloadId // empty')
+
+          if [ -z "${DOWNLOAD_ID}" ]; then
+            echo "Error: Could not find universal APK download ID"
+            echo "apk_downloaded=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Found universal APK download ID: ${DOWNLOAD_ID}"
+          echo "Downloading signed universal APK..."
+          curl -L -X GET \
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE_NAME}/generatedApks/${VERSION_CODE}/downloads/${DOWNLOAD_ID}:download" \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -o "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
+
+          if [ -f "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk" ]; then
+            FILE_SIZE=$(stat -c%s "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk" 2>/dev/null || stat -f%z "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk")
+            echo "Downloaded APK size: ${FILE_SIZE} bytes"
+            if [ "${FILE_SIZE}" -gt 1000 ]; then
+              echo "apk_downloaded=true" >> $GITHUB_OUTPUT
+              echo "Successfully downloaded signed APK from Google Play"
+            else
+              echo "apk_downloaded=false" >> $GITHUB_OUTPUT
+              echo "Warning: Downloaded file seems too small, may have failed"
+            fi
+          else
+            echo "apk_downloaded=false" >> $GITHUB_OUTPUT
+            echo "Error: APK file not found after download"
+          fi
+
+      - name: Upload signed APK to GitHub release
+        if: steps.download-apk.outputs.apk_downloaded == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version }}
@@ -144,8 +221,8 @@ jobs:
           files: |
             ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk
 
-      - name: Upload AAB to GitHub release (Play Store upload failed)
-        if: steps.publish.outcome == 'failure'
+      - name: Upload AAB to GitHub release (Play Store upload or APK download failed)
+        if: steps.publish.outcome == 'failure' || steps.download-apk.outputs.apk_downloaded != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version }}
@@ -166,4 +243,4 @@ jobs:
             ### Installation
             Upload the AAB to Google Play Console manually.
 
-            > **Note**: Play Store upload failed. Please upload the AAB manually to Google Play Console.
+            > **Note**: Play Store upload or signed APK download failed. Please upload the AAB manually to Google Play Console.
