@@ -189,8 +189,8 @@ jobs:
 
           echo "Found universal APK download ID: ${DOWNLOAD_ID}"
           echo "Downloading signed universal APK..."
-          curl -L -X GET \
-            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE_NAME}/generatedApks/${VERSION_CODE}/downloads/${DOWNLOAD_ID}:download" \
+          curl -L -s \
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE_NAME}/generatedApks/${VERSION_CODE}/downloads/${DOWNLOAD_ID}:download?alt=media" \
             -H "Authorization: Bearer ${ACCESS_TOKEN}" \
             -o "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
 
@@ -222,7 +222,7 @@ jobs:
             ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk
 
       - name: Upload AAB to GitHub release (Play Store upload or APK download failed)
-        if: steps.publish.outcome == 'failure' || steps.download-apk.outputs.apk_downloaded != 'true'
+        if: steps.publish.outcome == 'failure'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version }}
