@@ -121,20 +121,20 @@ jobs:
           mv build/app/outputs/flutter-apk/app-release.apk "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
           echo "Release APK created: ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
 
-      # - name: Decode Google Play service account
-      #   run: |
-      #     echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_BASE64 }}" | base64 -d > service-account.json
+      - name: Decode Google Play service account
+        run: |
+          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_BASE64 }}" | base64 -d > service-account.json
 
-      # - name: Upload to Google Play Store
-      #   id: publish
-      #   continue-on-error: true
-      #   uses: r0adkll/upload-google-play@v1
-      #   with:
-      #     serviceAccountJson: service-account.json
-      #     packageName: ${{ inputs.pkg }}
-      #     releaseFiles: ${{ inputs.name }}-android-${{ inputs.version }}.aab
-      #     track: production
-      #     status: completed
+      - name: Upload to Google Play Store
+        id: publish
+        continue-on-error: true
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: service-account.json
+          packageName: ${{ inputs.pkg }}
+          releaseFiles: ${{ inputs.name }}-android-${{ inputs.version }}.aab
+          track: production
+          status: completed
 
       - name: Upload APK to GitHub release
         uses: softprops/action-gh-release@v2
@@ -147,18 +147,18 @@ jobs:
           files: |
             ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk
 
-      # - name: Upload AAB to GitHub release (Play Store upload failed)
-      #   if: steps.publish.outcome == 'failure'
-      #   uses: softprops/action-gh-release@v2
-      #   with:
-      #     tag_name: ${{ inputs.version }}
-      #     name: Release ${{ inputs.version }}
-      #     draft: false
-      #     prerelease: false
-      #     files: |
-      #       ${{ inputs.name }}-android-${{ inputs.version }}.aab
-      #     body: |
-      #       ## Android Application for ${{ inputs.version }}
+      - name: Upload AAB to GitHub release (Play Store upload failed)
+        if: steps.publish.outcome == 'failure'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: Release ${{ inputs.version }}
+          draft: false
+          prerelease: false
+          files: |
+            ${{ inputs.name }}-android-${{ inputs.version }}.aab
+          body: |
+            ## Android Application for ${{ inputs.version }}
 
-      #       ### Note
-      #       Play Store upload failed. Please upload the AAB manually to Google Play Console.
+            ### Note
+            Play Store upload failed. Please upload the AAB manually to Google Play Console.
