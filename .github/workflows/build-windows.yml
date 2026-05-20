@@ -89,6 +89,14 @@ jobs:
 
       - name: Build Windows app
         shell: bash
+        env:
+          # The gal plugin (gal-2.3.2) still pulls in <experimental/coroutine>,
+          # which the current MSVC toolchain shipped on windows-latest turns
+          # into a hard static_assert error. The error message itself suggests
+          # this exact define as the suppression knob. MSVC reads the `CL` env
+          # var as extra cl.exe flags, so this applies to every translation
+          # unit in the build (plugin and runner alike).
+          CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: |
           set -xeuo pipefail
 
