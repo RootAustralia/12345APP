@@ -96,7 +96,14 @@ jobs:
           # this exact define as the suppression knob. MSVC reads the `CL` env
           # var as extra cl.exe flags, so this applies to every translation
           # unit in the build (plugin and runner alike).
-          CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
+          #
+          # Use the `-D` form (not `/D`). The step runs in Git Bash, where
+          # MSYS path-mangling rewrites anything that starts with `/` into a
+          # Windows path — `/D_SILENCE_…` would become `C:\Program Files\Git\D_SILENCE_…`
+          # before cl.exe ever sees it, breaking even CMake's compiler-probe
+          # ("No CMAKE_CXX_COMPILER could be found"). `-D` is equivalent to
+          # `/D` for cl.exe and is left untouched by MSYS.
+          CL: -D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: |
           set -xeuo pipefail
 
