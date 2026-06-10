@@ -31,7 +31,7 @@ jobs:
       submission-success: ${{ steps.publish.outcome == 'success' }}
     steps:
       - name: Checkout private repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.PRIVATE_REPO }}
           token: ${{ secrets.ORG_TOKEN }}
@@ -41,14 +41,11 @@ jobs:
 
       - name: Configure the Microsoft Store CLI
         shell: pwsh
-        run: |
-          Install-Module -Name StoreBroker -Force
+        run: Install-Module -Name StoreBroker -Force
 
       - name: Clean build artifacts
         shell: bash
-        run: |
-          rm -rf build windows/.Dart_tool .dart_tool
-          echo "Cleaned build artifacts for fresh amd64 build"
+        run: rm -rf build windows/.Dart_tool .dart_tool
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -66,89 +63,52 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pub-
 
-      - name: Set build environment
+      - name: Enable Windows desktop + native-assets
         shell: bash
         run: |
-          set -xeuo pipefail
-          echo "BUILD_VERSION=${{ inputs.version }}" >> "${GITHUB_ENV}"
+          flutter config --enable-windows-desktop
+          flutter config --enable-native-assets
+
 
       - name: Install Flutter dependencies
         shell: bash
         run: |
           flutter pub get
-
-      - name: Check Flutter version
-        shell: bash
-        run: |
           flutter --version
 
-      - name: Enable Windows desktop
-        shell: bash
-        run: |
-          flutter config --enable-windows-desktop
+          
 
       - name: Build Windows app
         shell: bash
         env:
-          # The gal plugin (gal-2.3.2) still pulls in <experimental/coroutine>,
-          # which the current MSVC toolchain shipped on windows-latest turns
-          # into a hard static_assert error. The error message itself suggests
-          # this exact define as the suppression knob. MSVC reads the `CL` env
-          # var as extra cl.exe flags, so this applies to every translation
-          # unit in the build (plugin and runner alike).
-          #
-          # Use the `-D` form (not `/D`). The step runs in Git Bash, where
-          # MSYS path-mangling rewrites anything that starts with `/` into a
-          # Windows path — `/D_SILENCE_…` would become `C:\Program Files\Git\D_SILENCE_…`
-          # before cl.exe ever sees it, breaking even CMake's compiler-probe
-          # ("No CMAKE_CXX_COMPILER could be found"). `-D` is equivalent to
-          # `/D` for cl.exe and is left untouched by MSYS.
           CL: -D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
         run: |
           set -xeuo pipefail
-
           echo "Building ${{ inputs.name }} ${{ inputs.version }} (Release Mode)"
-
           flutter build windows --release \
             --obfuscate \
             --split-debug-info=debug-info/windows-amd64 \
             --suppress-analytics \
             --no-tree-shake-icons
 
-          echo "Verifying build output:"
-          ls -lh build/windows
-          ls -lh build/windows/x64/runner/Release/
-
       - name: Compose MSIX env
         shell: bash
         run: |
           set -xeuo pipefail
-
           VERSION="${{ inputs.version }}"
           VERSION="${VERSION#v}"
           IFS='.' read -r a b c <<< "$VERSION"
-          BUILD_NUMBER=0
-          MSIX_VERSION="${a}.${b}.${c}.${BUILD_NUMBER}"
+          MSIX_VERSION="${a}.${b}.${c}.0"
           MSIX_FILENAME="${{ inputs.name }}-windows-amd64-${{ inputs.version }}-store.msix"
-
-          echo "Input version: ${{ inputs.version }}"
-          echo "MSIX version: ${MSIX_VERSION}"
-          echo "MSIX filename: ${MSIX_FILENAME}"
-
           echo "MSIX_VERSION=${MSIX_VERSION}" >> "${GITHUB_ENV}"
           echo "MSIX_FILENAME=${MSIX_FILENAME}" >> "${GITHUB_ENV}"
 
-      - name: Build MSIX package(Store)
+      - name: Build MSIX package (Store)
         shell: bash
         run: |
           set -xeuo pipefail
-
-          echo "Building Store MSIX package for ${{ inputs.name }} ${{ inputs.version }}"
-          echo "Using MSIX version: ${MSIX_VERSION}"
-
           DISPLAY_NAME="${{ secrets.PARTNER_APP }}"
           DISPLAY_NAME="${DISPLAY_NAME##*.}"
-
           dart run msix:create \
             -e "internetClient, privateNetworkClientServer" \
             -d "${DISPLAY_NAME}" \
@@ -164,11 +124,8 @@ jobs:
       - name: Move Store MSIX
         shell: pwsh
         run: |
-          $msixPath = "$env:MSIX_FILENAME"
-          Move-Item "build/windows/x64/runner/Release/*.msix" $msixPath
-
-          Write-Host "Store package ready:"
-          Get-Item $msixPath | Select-Object Name, Length
+          Move-Item "build/windows/x64/runner/Release/*.msix" $env:MSIX_FILENAME
+          Get-Item $env:MSIX_FILENAME | Select-Object Name, Length
 
       - name: Publish to Store
         id: publish
@@ -184,20 +141,4 @@ jobs:
           draft: false
           prerelease: false
           overwrite_files: true
-          files: |
-            ${{ env.MSIX_FILENAME }}
-          body: |
-            ## Windows Application for ${{ inputs.version }}
-
-            ### Build Configuration
-            - **Platform**: Windows
-            - **Architecture**: amd64
-            - **Build Type**: Release (Obfuscated)
-            - **Code Obfuscation**: Enabled
-            - **Debug Symbols**: Available as workflow artifact
-
-            ### Installation
-            Download and double-click the MSIX file to install the application
-
-            > **Note**: Store publish failed. This is the unsigned MSIX package.
-
+          files: ${{ env.MSIX_FILENAME }}

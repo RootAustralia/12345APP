@@ -21,7 +21,7 @@ jobs:
       pkg: ${{ steps.get-info.outputs.pkg }}
     steps:
       - name: Checkout private repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.PRIVATE_REPO }}
           token: ${{ secrets.ORG_TOKEN }}
@@ -35,9 +35,7 @@ jobs:
           echo "name=${NAME}" >> $GITHUB_OUTPUT
           echo "pkg=${PKG}" >> $GITHUB_OUTPUT
           echo "version=v${VERSION}" >> $GITHUB_OUTPUT
-          echo "Detected name: ${NAME}"
-          echo "Detected package: ${PKG}"
-          echo "Detected version: v${VERSION}"
+          echo "Detected name: ${NAME}, package: ${PKG}, version: v${VERSION}"
 
   build-windows:
     needs: check-for-version

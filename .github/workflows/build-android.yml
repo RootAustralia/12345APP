@@ -28,13 +28,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout private repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.PRIVATE_REPO }}
           token: ${{ secrets.ORG_TOKEN }}
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -59,16 +59,11 @@ jobs:
         id: build-env
         run: |
           set -xeuo pipefail
-
           VERSION="${{ inputs.version }}"
           VERSION="${VERSION#v}"
           IFS='.' read -r a b c <<< "$VERSION"
           BUILD_NUMBER=$((a * 100 + b * 10 + c))
-          echo "Calculated build number: ${BUILD_NUMBER} from version ${VERSION}"
-
           sed -i "s/^version: .*/version: ${VERSION}+${BUILD_NUMBER}/" pubspec.yaml
-          echo "Updated pubspec.yaml version to: ${VERSION}+${BUILD_NUMBER}"
-
           echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
 
       - name: Install Flutter dependencies
@@ -82,7 +77,6 @@ jobs:
       - name: Setup Android signing
         run: |
           echo "${{ secrets.PKCS12_BASE64 }}" | base64 -d > android/app/${{ secrets.PKCS12_NAME }}-keystore.jks
-
           cat > android/key.properties << EOF
           storePassword=${{ secrets.PKCS12_PASSWORD }}
           keyPassword=${{ secrets.PKCS12_PASSWORD }}
@@ -93,37 +87,29 @@ jobs:
       - name: Build Android App Bundle and APK
         run: |
           set -xeuo pipefail
-
           echo "Building ${{ inputs.name }} ${{ inputs.version }} (Release Mode)"
           rm -rf .dart_tool android/.gradle
           flutter gen-l10n
           flutter pub run flutter_launcher_icons
 
-          echo "Building App Bundle..."
           flutter build appbundle --release \
               --obfuscate \
               --split-debug-info=debug-info/android \
               --suppress-analytics \
               --no-tree-shake-icons
+          mv build/app/outputs/bundle/release/app-release.aab \
+             "${{ inputs.name }}-android-${{ inputs.version }}.aab"
 
-          echo "Renaming AAB for release..."
-          mv build/app/outputs/bundle/release/app-release.aab "${{ inputs.name }}-android-${{ inputs.version }}.aab"
-          echo "Release AAB created: ${{ inputs.name }}-android-${{ inputs.version }}.aab"
-
-          echo "Building APK..."
           flutter build apk --release \
               --obfuscate \
               --split-debug-info=debug-info/android \
               --suppress-analytics \
               --no-tree-shake-icons
-
-          echo "Renaming APK for release..."
-          mv build/app/outputs/flutter-apk/app-release.apk "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
-          echo "Release APK created: ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
 
       - name: Decode Google Play service account
-        run: |
-          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_BASE64 }}" | base64 -d > service-account.json
+        run: echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_BASE64 }}" | base64 -d > service-account.json
 
       - name: Upload to Google Play Store
         id: publish
@@ -144,8 +130,7 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
-          files: |
-            ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk
+          files: ${{ inputs.name }}-android-universal-${{ inputs.version }}.apk
 
       - name: Upload AAB to GitHub release (Play Store upload failed)
         if: steps.publish.outcome == 'failure'
@@ -155,10 +140,4 @@ jobs:
           name: Release ${{ inputs.version }}
           draft: false
           prerelease: false
-          files: |
-            ${{ inputs.name }}-android-${{ inputs.version }}.aab
-          body: |
-            ## Android Application for ${{ inputs.version }}
-
-            ### Note
-            Play Store upload failed. Please upload the AAB manually to Google Play Console.
+          files: ${{ inputs.name }}-android-${{ inputs.version }}.aab
