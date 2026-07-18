@@ -1,3 +1,11 @@
+# .github/workflows/publish.yml — scheduled MSIX-to-release housekeeping (12345APP CI repo).
+# Role in system: independent of the build.yml fan-out. Runs daily (and on manual/self-edit triggers) to pull
+#   the latest Store-published MSIX for our app and mirror it onto the GitHub release of the PRIVATE APP12345 repo,
+#   backfilling the Windows artifact that build-windows.yml only uploads as a fallback when Store publish fails.
+# Key pieces: on.schedule (cron '0 0 * * *') + workflow_dispatch + push-on-self-edit; job upload-to-release uses
+#   JasonWei512/Upload-Microsoft-Store-MSIX-Package-to-GitHub-Release keyed by PARTNER_STORE (store-id).
+# Note: continue-on-error — a no-op day (no new Store package) must not fail the run; asset name uses PKCS12_NAME.
+
 name: publish
 
 on:

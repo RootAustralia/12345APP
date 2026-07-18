@@ -1,3 +1,13 @@
+# .github/workflows/build-windows.yml — reusable workflow: build + publish the Windows app (MSIX).
+# Role in system: one of three fan-out targets called by build.yml (this 12345APP CI repo).
+#   Checks out the PRIVATE APP12345 repo (which vendors windows/librainbox.{dll,lib,h}), enables Flutter
+#   native-assets so hook/build.dart stages librainbox.dll next to runner.exe, builds an unsigned Store MSIX
+#   (msix identity passed entirely as CLI flags — APP12345 has no msix_config block), publishes to the MS Store.
+# Key pieces: workflow_call inputs {name,pkg,version}; steps msstore reconfigure, Enable native-assets,
+#   Build Windows app, Build MSIX package (Store) via `dart run msix:create`, Publish to Store, release fallback.
+# Note: partner-center creds (PARTNER_TENANT/SELLER/CLIENT/SECRET/CN/COMPANY/APP) are sensitive; --sign-msix false
+#   because the Store re-signs on ingestion. Publish is continue-on-error -> GitHub-release fallback on failure.
+
 name: build-windows
 
 env:
@@ -98,6 +108,7 @@ jobs:
           VERSION="${{ inputs.version }}"
           VERSION="${VERSION#v}"
           IFS='.' read -r a b c <<< "$VERSION"
+          # MSIX requires a 4-part version; the Store reserves revision 0, so append .0.
           MSIX_VERSION="${a}.${b}.${c}.0"
           MSIX_FILENAME="${{ inputs.name }}-windows-amd64-${{ inputs.version }}-store.msix"
           echo "MSIX_VERSION=${MSIX_VERSION}" >> "${GITHUB_ENV}"
@@ -108,6 +119,7 @@ jobs:
         run: |
           set -xeuo pipefail
           DISPLAY_NAME="${{ secrets.PARTNER_APP }}"
+          # PARTNER_APP is a dotted identity (e.g. Company.AppName); strip to the last segment for display.
           DISPLAY_NAME="${DISPLAY_NAME##*.}"
           dart run msix:create \
             -e "internetClient, privateNetworkClientServer" \

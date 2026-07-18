@@ -1,3 +1,12 @@
+# .github/workflows/build.yml — top-level orchestrator for the store-release build (12345APP CI repo).
+# Role in system: entry point of the release pipeline. Triggered by a `pubspec-updated` repository_dispatch
+#   that APP12345's own ci.yml POSTs here when a version bump lands on master (also runnable manually).
+#   It reads app identity from the PRIVATE APP12345 repo, then fans out to the three reusable build workflows.
+# Key pieces: on.repository_dispatch types [pubspec-updated] + workflow_dispatch; job check-for-version reads
+#   name/version (pubspec.yaml) and pkg/applicationId (android build.gradle.kts) from the checked-out private repo;
+#   jobs build-windows / build-android / build-apple call the sibling build-*.yml with those outputs, secrets: inherit.
+# Note: version output is prefixed with `v` (used as the GitHub release tag by every downstream workflow).
+
 name: build
 
 env:
@@ -30,6 +39,7 @@ jobs:
         id: get-info
         run: |
           NAME=$(grep '^name:' pubspec.yaml | sed 's/name: *//' | tr -d ' ')
+          # Package/bundle id is the source of truth for Play/App Store; read it from the Android Gradle config.
           PKG=$(grep 'applicationId' android/app/build.gradle.kts | sed 's/.*applicationId = "\(.*\)".*/\1/')
           VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | tr -d ' ')
           echo "name=${NAME}" >> $GITHUB_OUTPUT

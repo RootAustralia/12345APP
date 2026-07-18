@@ -1,3 +1,13 @@
+# .github/workflows/build-android.yml — reusable workflow: build + publish the Android app.
+# Role in system: one of three fan-out targets called by build.yml (this 12345APP CI repo).
+#   Checks out the PRIVATE APP12345 repo (which vendors the prebuilt librainbox.so ABIs),
+#   builds a signed AAB + universal APK with Flutter, ships AAB -> Google Play and APK -> GitHub release.
+# Key pieces: workflow_call inputs {name,pkg,version}; steps Set build environment (versionCode),
+#   Setup Android signing, Build Android App Bundle and APK, Upload to Google Play Store, GitHub-release uploads.
+# Note: secrets (PKCS12 keystore, Google service account) are decoded to disk on the runner — sensitive.
+#   Play upload is continue-on-error; the AAB only lands on the GitHub release when Play upload FAILS,
+#   whereas the APK is always attached to the release.
+
 name: build-android
 
 env:
@@ -62,7 +72,9 @@ jobs:
           VERSION="${{ inputs.version }}"
           VERSION="${VERSION#v}"
           IFS='.' read -r a b c <<< "$VERSION"
+          # Derive a monotonic Android versionCode from semver: e.g. 2.9.7 -> 297.
           BUILD_NUMBER=$((a * 100 + b * 10 + c))
+          # Rewrite pubspec's `version:` to `X.Y.Z+BUILD` so Flutter stamps versionName+versionCode.
           sed -i "s/^version: .*/version: ${VERSION}+${BUILD_NUMBER}/" pubspec.yaml
           echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
 
