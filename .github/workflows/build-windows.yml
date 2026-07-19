@@ -7,9 +7,25 @@
 #   Build Windows app, Build MSIX package (Store) via `dart run msix:create`, Publish to Store, release fallback.
 # Note: partner-center creds (PARTNER_TENANT/SELLER/CLIENT/SECRET/CN/COMPANY/APP) are sensitive; --sign-msix false
 #   because the Store re-signs on ingestion. Publish is continue-on-error -> GitHub-release fallback on failure.
+# 【中文】
+# .github/workflows/build-windows.yml —— 可复用工作流:构建并发布 Windows 应用(MSIX)。
+# 系统角色: build.yml(本 12345APP CI 仓库)扇出调用的三个目标工作流之一。
+#   检出私有 APP12345 仓库(其中 vendored 提交了 windows/librainbox.{dll,lib,h}),启用 Flutter
+#   native-assets 让 hook/build.dart 把 librainbox.dll 布置到 runner.exe 旁,构建未签名的
+#   Store MSIX(msix 身份信息全部通过 CLI 参数传入 —— APP12345 没有 msix_config 配置块),发布到微软商店。
+# 关键部分: workflow_call 输入 {name,pkg,version};步骤:msstore reconfigure、Enable native-assets、
+#   Build Windows app、经 `dart run msix:create` 的 Build MSIX package (Store)、Publish to Store、Release 兜底。
+# 注意: 合作伙伴中心凭据(PARTNER_TENANT/SELLER/CLIENT/SECRET/CN/COMPANY/APP)属敏感数据;
+#   --sign-msix false 是因为商店在接收时会重新签名。发布为 continue-on-error —— 失败时兜底上传 GitHub Release。
 
 name: build-windows
 
+# ── Section: Shared env & permissions ── GITHUB_TOKEN feeds the release-upload fallback,
+#    PARTNER_CENTER_API is the Partner Center endpoint, PRIVATE_REPO names the private repo to
+#    check out; contents:write lets this job create releases.
+# 【中文】
+# ── 本节:共享环境变量与权限 ── GITHUB_TOKEN 供 Release 兜底上传使用,PARTNER_CENTER_API 是
+#    合作伙伴中心接口地址,PRIVATE_REPO 指明要检出的私有仓库;contents:write 授权创建 GitHub Release。
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PARTNER_CENTER_API: https://manage.devcenter.microsoft.com/v1.0/my/applications
@@ -18,6 +34,11 @@ env:
 permissions:
   contents: write
 
+# ── Section: workflow_call trigger & inputs ── this is a REUSABLE workflow: build.yml invokes it,
+#    passing the app display name, the package id, and the version string to build/publish.
+# 【中文】
+# ── 本节:workflow_call 触发器与输入 ── 这是「可复用工作流」:由 build.yml 调用,
+#    传入应用显示名、包名(pkg)以及要构建/发布的版本号。
 on:
   workflow_call:
     inputs:
@@ -34,18 +55,35 @@ on:
         type: string
         description: 'Version to build'
 
+# ── Section: build-windows-app job ── the single Windows job for the whole build → package →
+#    publish pipeline; exports submission-success so the caller (build.yml) can react to whether
+#    the Store publish went through.
+# 【中文】
+# ── 本节:build-windows-app 任务 ── 唯一的 Windows 任务,承担整条构建 → 打包 → 发布流水线;
+#    导出 submission-success 输出,让调用方 build.yml 得知商店发布是否成功。
 jobs:
   build-windows-app:
     runs-on: windows-latest
     outputs:
       submission-success: ${{ steps.publish.outcome == 'success' }}
     steps:
+      # ── Section: Source checkout ── pulls the PRIVATE APP12345 repo (app source + the vendored
+      #    windows/librainbox.{dll,lib,h}) using the cross-repo ORG_TOKEN.
+      # 【中文】
+      # ── 本节:源码检出 ── 用跨仓库的 ORG_TOKEN 检出私有 APP12345 仓库
+      #    (应用源码 + vendored 的 windows/librainbox.{dll,lib,h})。
       - name: Checkout private repository
         uses: actions/checkout@v6
         with:
           repository: ${{ env.PRIVATE_REPO }}
           token: ${{ secrets.ORG_TOKEN }}
 
+      # ── Section: Microsoft Store CLI setup ── installs the msstore CLI, authenticates it against
+      #    Partner Center with the tenant/seller/client secrets, and installs the StoreBroker
+      #    PowerShell module — the tooling the Publish step relies on.
+      # 【中文】
+      # ── 本节:微软商店 CLI 准备 ── 安装 msstore CLI,用 tenant/seller/client 机密向合作伙伴
+      #    中心完成认证,并安装 StoreBroker PowerShell 模块 —— 这是后面 Publish 步骤依赖的工具链。
       - uses: microsoft/microsoft-store-apppublisher@v1.2
       - run: msstore reconfigure --tenantId ${{ secrets.PARTNER_TENANT }} --sellerId ${{ secrets.PARTNER_SELLER }} --clientId ${{ secrets.PARTNER_CLIENT }} --clientSecret ${{ secrets.PARTNER_SECRET }}
 
@@ -53,6 +91,11 @@ jobs:
         shell: pwsh
         run: Install-Module -Name StoreBroker -Force
 
+      # ── Section: Toolchain setup ── wipes stale build output, installs stable-channel Flutter,
+      #    and caches pub dependencies keyed on pubspec.lock to speed up repeat builds.
+      # 【中文】
+      # ── 本节:工具链准备 ── 清除残留构建产物,安装 stable 渠道 Flutter,
+      #    并按 pubspec.lock 缓存 pub 依赖以加速后续构建。
       - name: Clean build artifacts
         shell: bash
         run: rm -rf build windows/.Dart_tool .dart_tool
@@ -73,6 +116,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pub-
 
+      # ── Section: Feature flags ── enables Windows desktop builds AND native-assets: with
+      #    native-assets on, APP12345's hook/build.dart emits the Windows CodeAsset that stages the
+      #    vendored librainbox.dll next to runner.exe — the key librainbox-integration switch here.
+      # 【中文】
+      # ── 本节:功能开关 ── 启用 Windows 桌面构建与 native-assets:开启 native-assets 后,
+      #    APP12345 的 hook/build.dart 会产出 Windows CodeAsset,把 vendored 的 librainbox.dll
+      #    布置到 runner.exe 旁 —— 这是本工作流集成 librainbox 的关键开关。
       - name: Enable Windows desktop + native-assets
         shell: bash
         run: |
@@ -80,6 +130,10 @@ jobs:
           flutter config --enable-native-assets
 
 
+      # ── Section: Dependency resolution ── fetches pub packages and logs the Flutter version
+      #    for build-log traceability.
+      # 【中文】
+      # ── 本节:依赖解析 ── 拉取 pub 依赖包,并打印 Flutter 版本以便在构建日志中追溯。
       - name: Install Flutter dependencies
         shell: bash
         run: |
@@ -88,6 +142,11 @@ jobs:
 
           
 
+      # ── Section: Flutter build ── release build of the Windows runner (obfuscated, split debug
+      #    info); the CL env var silences MSVC's experimental-coroutine deprecation warnings.
+      # 【中文】
+      # ── 本节:Flutter 构建 ── 以 Release 模式构建 Windows runner(启用混淆并拆分调试符号);
+      #    CL 环境变量用于压制 MSVC 的 experimental-coroutine 弃用警告。
       - name: Build Windows app
         shell: bash
         env:
@@ -101,6 +160,11 @@ jobs:
             --suppress-analytics \
             --no-tree-shake-icons
 
+      # ── Section: MSIX versioning ── converts the 3-part semver into the 4-part x.y.z.0 form
+      #    MSIX requires and computes the final artifact filename, exported via GITHUB_ENV.
+      # 【中文】
+      # ── 本节:MSIX 版本号 ── 把三段语义化版本转成 MSIX 要求的四段 x.y.z.0 形式,
+      #    并计算最终产物文件名,经 GITHUB_ENV 导出给后续步骤。
       - name: Compose MSIX env
         shell: bash
         run: |
@@ -114,6 +178,16 @@ jobs:
           echo "MSIX_VERSION=${MSIX_VERSION}" >> "${GITHUB_ENV}"
           echo "MSIX_FILENAME=${MSIX_FILENAME}" >> "${GITHUB_ENV}"
 
+      # ── Section: MSIX packaging ── `dart run msix:create` wraps the built runner (plus the
+      #    staged librainbox.dll) into a Store MSIX; ALL identity/config comes from Partner Center
+      #    secrets as CLI flags (no pubspec msix_config), and it stays unsigned (--sign-msix false)
+      #    because the Store re-signs on ingestion. The result is then renamed to the versioned
+      #    MSIX_FILENAME used by the publish/fallback steps.
+      # 【中文】
+      # ── 本节:MSIX 打包 ── 用 `dart run msix:create` 把构建好的 runner(连同已布置的
+      #    librainbox.dll)打成 Store MSIX;全部身份/配置来自合作伙伴中心机密并以 CLI 参数传入
+      #    (pubspec 中没有 msix_config),且不签名(--sign-msix false),因为商店接收时会重新签名。
+      #    随后将产物重命名为带版本号的 MSIX_FILENAME,供发布/兜底步骤使用。
       - name: Build MSIX package (Store)
         shell: bash
         run: |
@@ -139,6 +213,13 @@ jobs:
           Move-Item "build/windows/x64/runner/Release/*.msix" $env:MSIX_FILENAME
           Get-Item $env:MSIX_FILENAME | Select-Object Name, Length
 
+      # ── Section: Store publishing & fallback ── submits the MSIX to the Microsoft Store via
+      #    msstore; continue-on-error feeds both the job's submission-success output and the
+      #    GitHub-release fallback below, which attaches the MSIX only when the publish failed.
+      # 【中文】
+      # ── 本节:商店发布与兜底 ── 通过 msstore 把 MSIX 提交到微软商店;continue-on-error 的结果
+      #    既决定任务的 submission-success 输出,也触发下方兜底 —— 仅在发布失败时把 MSIX 附到
+      #    GitHub Release,确保产物不会丢失。
       - name: Publish to Store
         id: publish
         continue-on-error: true

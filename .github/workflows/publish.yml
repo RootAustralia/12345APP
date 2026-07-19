@@ -5,9 +5,23 @@
 # Key pieces: on.schedule (cron '0 0 * * *') + workflow_dispatch + push-on-self-edit; job upload-to-release uses
 #   JasonWei512/Upload-Microsoft-Store-MSIX-Package-to-GitHub-Release keyed by PARTNER_STORE (store-id).
 # Note: continue-on-error — a no-op day (no new Store package) must not fail the run; asset name uses PKCS12_NAME.
+# 【中文】
+# 本文件是 12345APP CI 仓库中的定时"善后"任务:把 Microsoft Store 上已发布的 MSIX 回填到 GitHub release。
+# 系统角色: 独立于 build.yml 的分发流程之外。每天定时运行(也可手动触发,或在本文件自身被修改时触发),
+#   拉取我们应用在商店发布的最新 MSIX,并镜像到私有 APP12345 仓库对应的 GitHub release 上,
+#   补齐 build-windows.yml 仅在商店发布失败时才作为兜底上传的那个 Windows 产物。
+# 关键部分: on.schedule(cron '0 0 * * *')+ workflow_dispatch + 修改自身时的 push 触发;
+#   job upload-to-release 使用 JasonWei512/Upload-Microsoft-Store-MSIX-Package-to-GitHub-Release,
+#   以 PARTNER_STORE(store-id)定位商店条目。
+# 注意: continue-on-error —— 当天商店没有新包(no-op)时绝不能让本次运行失败;资产名使用 PKCS12_NAME。
 
 name: publish
 
+# ── Section: triggers ── daily cron at midnight UTC (the routine mirror run), manual workflow_dispatch,
+#   plus a push trigger scoped to this very file on master — editing the workflow re-runs it as a self-test.
+# 【中文】
+# ── 本节:触发条件 ── 每天 UTC 零点的 cron 定时(常规镜像任务);可用 workflow_dispatch 手动触发;
+#   另有仅限本文件路径、master 分支的 push 触发 —— 修改本工作流即会重新运行一次,相当于改动自测。
 on:
   schedule:
     - cron: '0 0 * * *'
@@ -18,6 +32,11 @@ on:
     paths:
       - ".github/workflows/publish.yml"
 
+# ── Section: global env & permissions ── GITHUB_TOKEN for attaching release assets, PRIVATE_REPO names
+#   the private APP12345 repo whose GitHub release receives the MSIX; contents:write allows the upload.
+# 【中文】
+# ── 本节:全局环境变量与权限 ── GITHUB_TOKEN 用于向 release 附加资产,PRIVATE_REPO 指向接收 MSIX 的
+#   私有 APP12345 仓库(其 GitHub release 是回填目标);contents: write 权限使上传得以进行。
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
@@ -26,6 +45,15 @@ permissions:
   contents: write
 
 jobs:
+  # ── Section: job upload-to-release ── first checks out the PRIVATE repo (so the release lookup targets
+  #   that repo), then pulls the latest Store-published MSIX by store-id (PARTNER_STORE) and attaches it to
+  #   the matching GitHub release. continue-on-error keeps a "no new Store package today" run green;
+  #   asset naming follows the PKCS12_NAME_{version}_{arch} pattern.
+  # 【中文】
+  # ── 本节:job upload-to-release ── 先检出私有仓库(使 release 查找定位到该仓库),
+  #   再按 store-id(PARTNER_STORE)拉取商店最新发布的 MSIX,并附加到对应的 GitHub release 上。
+  #   continue-on-error 保证"当天商店没有新包"时运行仍显示为绿色;
+  #   资产命名遵循 PKCS12_NAME_{version}_{arch} 模式。
   upload-to-release:
     runs-on: ubuntu-24.04
     steps:

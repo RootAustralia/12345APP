@@ -6,9 +6,25 @@
 #   name/version (pubspec.yaml) and pkg/applicationId (android build.gradle.kts) from the checked-out private repo;
 #   jobs build-windows / build-android / build-apple call the sibling build-*.yml with those outputs, secrets: inherit.
 # Note: version output is prefixed with `v` (used as the GitHub release tag by every downstream workflow).
+# 【中文】
+# 本文件是 12345APP CI 仓库中商店发布构建的顶层编排器(orchestrator)。
+# 系统角色: 发布流水线的入口。当版本号提升(version bump)合入 master 时,APP12345 私有仓库自己的 ci.yml
+#   会向本仓库 POST 一个 `pubspec-updated` repository_dispatch 事件来触发它(也支持手动触发)。
+#   它先从私有的 APP12345 仓库读取应用身份信息,再分发(fan out)给三个可复用的平台构建工作流。
+# 关键部分: on.repository_dispatch types [pubspec-updated] + workflow_dispatch;job check-for-version 从检出的
+#   私有仓库读取 name/version(来自 pubspec.yaml)与包名 pkg/applicationId(来自 android build.gradle.kts);
+#   jobs build-windows / build-android / build-apple 携带这些输出调用同目录下的 build-*.yml,secrets: inherit。
+# 注意: version 输出带有 `v` 前缀(所有下游工作流都用它作为 GitHub release 的 tag)。
 
 name: build
 
+# ── Section: global env & permissions ── secrets-backed globals shared by all jobs: GITHUB_TOKEN for
+#   release operations, PRIVATE_REPO names the private APP12345 source repo to check out; contents:write
+#   is required so downstream jobs can create/update GitHub releases.
+# 【中文】
+# ── 本节:全局环境变量与权限 ── 所有 job 共享的、由 secrets 提供的全局值:GITHUB_TOKEN 用于
+#   release 相关操作,PRIVATE_REPO 指向要检出的私有 APP12345 源码仓库;contents: write 权限
+#   使下游 job 能够创建/更新 GitHub release。
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
@@ -16,12 +32,26 @@ env:
 permissions:
   contents: write
 
+# ── Section: triggers ── fires on the `pubspec-updated` repository_dispatch that APP12345's own ci.yml
+#   POSTs here after a version bump lands on master (the release signal), or manually via workflow_dispatch.
+# 【中文】
+# ── 本节:触发条件 ── 由 APP12345 私有仓库自己的 ci.yml 在 master 上版本号提升后 POST 过来的
+#   `pubspec-updated` repository_dispatch 事件触发(即"发版信号");也可通过 workflow_dispatch 手动触发。
 on:
   repository_dispatch:
     types: [pubspec-updated]
   workflow_dispatch:
 
 jobs:
+  # ── Section: job check-for-version ── checks out the PRIVATE APP12345 repo and extracts the app
+  #   identity: app name + version from pubspec.yaml, the store package/bundle id from
+  #   android/app/build.gradle.kts (applicationId). Exposes all three as job outputs — version gets a
+  #   `v` prefix and becomes the GitHub release tag — consumed by the three platform build jobs below.
+  # 【中文】
+  # ── 本节:job check-for-version ── 检出私有的 APP12345 仓库并提取应用身份信息:从 pubspec.yaml
+  #   读取应用名 name 与版本号 version,从 android/app/build.gradle.kts 读取商店包名(applicationId)。
+  #   三者以 job outputs 形式导出 —— 其中 version 加上 `v` 前缀,作为 GitHub release 的 tag ——
+  #   供下面三个平台构建 job 使用。
   check-for-version:
     runs-on: ubuntu-latest
     outputs:
@@ -40,13 +70,24 @@ jobs:
         run: |
           NAME=$(grep '^name:' pubspec.yaml | sed 's/name: *//' | tr -d ' ')
           # Package/bundle id is the source of truth for Play/App Store; read it from the Android Gradle config.
-          PKG=$(grep 'applicationId' android/app/build.gradle.kts | sed 's/.*applicationId = "\(.*\)".*/\1/')
+          # Anchored to the real assignment line — a bare grep also matches doc comments mentioning the
+          # property name, and a multi-line PKG breaks GITHUB_OUTPUT (broke the v3.0.0 release once).
+          PKG=$(grep -E '^[[:space:]]*applicationId = "' android/app/build.gradle.kts | head -1 | sed 's/.*applicationId = "\(.*\)".*/\1/')
           VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: *//' | tr -d ' ')
           echo "name=${NAME}" >> $GITHUB_OUTPUT
           echo "pkg=${PKG}" >> $GITHUB_OUTPUT
           echo "version=v${VERSION}" >> $GITHUB_OUTPUT
           echo "Detected name: ${NAME}, package: ${PKG}, version: v${VERSION}"
 
+  # ── Section: platform fan-out ── the three jobs below each invoke a reusable sibling workflow with
+  #   the detected name/pkg/version and `secrets: inherit`, building + signing + publishing per store.
+  # ── Job build-windows ── calls build-windows.yml: Flutter Windows build (native-assets stages the
+  #   vendored librainbox.dll), MSIX packaging, then Microsoft Store publish (GitHub-release fallback).
+  # 【中文】
+  # ── 本节:平台分发(fan-out)── 下面三个 job 各自调用一个可复用的同级工作流,传入上一步得到的
+  #   name/pkg/version,并通过 `secrets: inherit` 继承全部密钥,分别完成各商店的构建、签名与发布。
+  # ── job build-windows ── 调用 build-windows.yml:Flutter Windows 构建(native-assets 阶段会安置
+  #   仓库内置的 librainbox.dll)、MSIX 打包,然后发布到 Microsoft Store(失败则回退上传 GitHub release)。
   build-windows:
     needs: check-for-version
     uses: ./.github/workflows/build-windows.yml
@@ -56,6 +97,11 @@ jobs:
       version: ${{ needs.check-for-version.outputs.version }}
     secrets: inherit
 
+  # ── Job build-android ── calls build-android.yml: verifies the 4 vendored jniLibs librainbox.so ABIs,
+  #   signs the AAB and uploads it to Google Play (APK — and AAB on Play failure — to the GitHub release).
+  # 【中文】
+  # ── job build-android ── 调用 build-android.yml:校验仓库内置的 4 个 ABI 的 jniLibs librainbox.so,
+  #   对 AAB 签名并上传 Google Play(APK 上传 GitHub release;Play 上传失败时 AAB 也回退到 release)。
   build-android:
     needs: check-for-version
     uses: ./.github/workflows/build-android.yml
@@ -65,6 +111,11 @@ jobs:
       version: ${{ needs.check-for-version.outputs.version }}
     secrets: inherit
 
+  # ── Job build-apple ── calls build-apple.yml (matrix ios/macos): imports signing cert + provisioning
+  #   into a throwaway keychain, builds IPA/PKG and uploads via altool to App Store Connect (release fallback).
+  # 【中文】
+  # ── job build-apple ── 调用 build-apple.yml(matrix:ios/macos):把签名证书与描述文件导入一次性
+  #   keychain,构建 IPA/PKG 并通过 altool 上传 App Store Connect(失败则回退上传 GitHub release)。
   build-apple:
     needs: check-for-version
     uses: ./.github/workflows/build-apple.yml

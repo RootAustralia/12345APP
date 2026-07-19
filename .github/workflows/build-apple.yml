@@ -6,9 +6,23 @@
 #   Install provisioning profiles, Build ${platform} app, Upload to App Store Connect, GitHub-release fallback.
 # Note: signing certs / provisioning / App Store Connect API key are decoded to a throwaway keychain
 #   and cleaned up in always()-guarded steps — sensitive, and cleanup must run even on build failure.
+# 【中文】
+# .github/workflows/build-apple.yml —— 可复用工作流:构建并发布 iOS 与 macOS 应用。
+# 系统角色: build.yml(本 12345APP CI 仓库)扇出调用的三个目标工作流之一。
+#   检出私有 APP12345 仓库(每个 ServiceExtension 内 vendored 提交了 librainbox.dylib),
+#   以 [ios, macos] 矩阵运行:构建已签名的 IPA / 安装器 PKG,并通过 `xcrun altool` 上传。
+# 关键部分: workflow_call 输入 {name,pkg,version};matrix.platform;步骤:Setup keychain and certificates、
+#   Install provisioning profiles、Build ${platform} app、Upload to App Store Connect、GitHub Release 兜底。
+# 注意: 签名证书 / 描述文件 / App Store Connect API 密钥会被解码进一次性钥匙串,
+#   并在 always() 保护的步骤中清理 —— 属敏感数据,即使构建失败清理也必须执行。
 
 name: build-apple
 
+# ── Section: Shared env & permissions ── GITHUB_TOKEN feeds the release-upload fallback and
+#    PRIVATE_REPO names the private repo to check out; contents:write lets this job create releases.
+# 【中文】
+# ── 本节:共享环境变量与权限 ── GITHUB_TOKEN 供 Release 兜底上传使用,PRIVATE_REPO 指明要
+#    检出的私有仓库;contents:write 授权本任务创建 GitHub Release。
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
@@ -16,6 +30,11 @@ env:
 permissions:
   contents: write
 
+# ── Section: workflow_call trigger & inputs ── this is a REUSABLE workflow: build.yml invokes it,
+#    passing the app display name, the bundle/package id, and the version string to build/publish.
+# 【中文】
+# ── 本节:workflow_call 触发器与输入 ── 这是「可复用工作流」:由 build.yml 调用,
+#    传入应用显示名、bundle/包名(pkg)以及要构建/发布的版本号。
 on:
   workflow_call:
     inputs:
@@ -32,6 +51,12 @@ on:
         type: string
         description: 'Version to build'
 
+# ── Section: build-apple-app job & matrix ── one macOS job fanned out twice via
+#    matrix.platform = [ios, macos]; every step below runs once per platform, branching
+#    only inside the build/upload steps.
+# 【中文】
+# ── 本节:build-apple-app 任务与矩阵 ── 单个 macOS 任务通过 matrix.platform = [ios, macos]
+#    扇出两次;下面每个步骤对每个平台各跑一遍,仅在构建/上传步骤内部按平台分支。
 jobs:
   build-apple-app:
     runs-on: macos-latest
@@ -39,12 +64,22 @@ jobs:
       matrix:
         platform: [ios, macos]
     steps:
+      # ── Section: Source checkout ── pulls the PRIVATE APP12345 repo (app source + the vendored
+      #    ServiceExtension/Frameworks/librainbox.dylib per platform) using the cross-repo ORG_TOKEN.
+      # 【中文】
+      # ── 本节:源码检出 ── 用跨仓库的 ORG_TOKEN 检出私有 APP12345 仓库
+      #    (应用源码 + 各平台 ServiceExtension/Frameworks 内 vendored 的 librainbox.dylib)。
       - name: Checkout private repository
         uses: actions/checkout@v6
         with:
           repository: ${{ env.PRIVATE_REPO }}
           token: ${{ secrets.ORG_TOKEN }}
 
+      # ── Section: Toolchain setup ── stable-channel Flutter, latest-stable Xcode, and a
+      #    pub-cache keyed on pubspec.lock so repeat builds skip dependency downloads.
+      # 【中文】
+      # ── 本节:工具链准备 ── 安装 stable 渠道 Flutter 与最新稳定版 Xcode,
+      #    并按 pubspec.lock 缓存 pub 依赖,让重复构建免于重新下载。
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -66,6 +101,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pub-
 
+      # ── Section: Build env & dependency resolution ── exports BUILD_VERSION, fetches pub
+      #    packages, and logs the Flutter version for build-log traceability.
+      # 【中文】
+      # ── 本节:构建环境与依赖解析 ── 导出 BUILD_VERSION,拉取 pub 依赖包,
+      #    并打印 Flutter 版本以便在构建日志中追溯。
       - name: Set build environment
         run: |
           set -xeuo pipefail
@@ -78,6 +118,12 @@ jobs:
         run: |
           flutter --version
 
+      # ── Section: Code-signing keychain ── creates a throwaway keychain with a random password,
+      #    imports the Apple distribution certificate (PKCS12) from secrets, and makes it the
+      #    user search keychain so xcodebuild can sign non-interactively (no UI prompts).
+      # 【中文】
+      # ── 本节:代码签名钥匙串 ── 用随机密码创建一次性钥匙串,从 secrets 导入 Apple 分发
+      #    证书(PKCS12),并将其设为用户搜索钥匙串,使 xcodebuild 能无交互地完成签名。
       - name: Setup keychain and certificates
         run: |
           APPLE_PKCS12_PATH=$RUNNER_TEMP/Certificates.p12
@@ -91,12 +137,26 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $APPLE_KEYCHAIN_PATH
           security list-keychain -d user -s $APPLE_KEYCHAIN_PATH
 
+      # ── Section: Provisioning profiles ── unpacks the base64'd tar.xz of profiles into the
+      #    directory Xcode scans, so both the Runner app and the ServiceExtension (the network
+      #    extension hosting librainbox) can be signed for store distribution.
+      # 【中文】
+      # ── 本节:描述文件安装 ── 将 base64 编码的 tar.xz 描述文件包解压到 Xcode 扫描的目录,
+      #    使 Runner 主应用与 ServiceExtension(承载 librainbox 的网络扩展)都能按商店分发要求签名。
       - name: Install provisioning profiles
         run: |
           APPLE_PROVISIONING_PATH="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$APPLE_PROVISIONING_PATH"
           echo -n "${{ secrets.APPLE_PROVISIONING_BASE64 }}" | base64 -d | tar -xJf - -C "$APPLE_PROVISIONING_PATH"
 
+      # ── Section: Platform build ── branches on the matrix: iOS builds a signed IPA driven by
+      #    ExportOptions.plist; macOS builds the .app then wraps it into a Mac App Store PKG signed
+      #    with the separate "3rd Party Mac Developer Installer" identity. Both branches are
+      #    obfuscated with split debug info and export UPLOAD_FILE for the upload steps below.
+      # 【中文】
+      # ── 本节:平台构建 ── 按矩阵分支:iOS 依据 ExportOptions.plist 构建已签名的 IPA;
+      #    macOS 先构建 .app,再用独立的「3rd Party Mac Developer Installer」身份签名打包为
+      #    Mac App Store PKG。两个分支都启用混淆并拆分调试符号,并导出 UPLOAD_FILE 供后续上传步骤使用。
       - name: Build ${{ matrix.platform }} app
         run: |
           set -xeuo pipefail
@@ -129,12 +189,25 @@ jobs:
             echo "UPLOAD_FILE=$PKG_PATH" >> "$GITHUB_ENV"
           fi
 
+      # ── Section: Signing cleanup ── always()-guarded: removes the throwaway keychain and the
+      #    installed provisioning profiles even when the build failed — signing secrets must not
+      #    outlive the job on a shared runner.
+      # 【中文】
+      # ── 本节:签名材料清理 ── 由 always() 保护:即使构建失败,也会删除一次性钥匙串和已安装的
+      #    描述文件 —— 签名机密绝不能在共享 runner 上残留到任务结束之后。
       - name: Clean up keychain
         if: always()
         run: |
           security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
           rm -rf "$HOME/Library/MobileDevice/Provisioning Profiles"
 
+      # ── Section: App Store Connect upload ── installs the ASC API key (.p8) where altool
+      #    expects it (~/private_keys), then uploads the IPA/PKG via `xcrun altool`.
+      #    continue-on-error: a failed upload falls through to the GitHub-release fallback below.
+      # 【中文】
+      # ── 本节:App Store Connect 上传 ── 把 ASC API 密钥(.p8)安装到 altool 约定的
+      #    ~/private_keys 目录,再用 `xcrun altool` 上传 IPA/PKG。设为 continue-on-error:
+      #    上传失败时转入下方的 GitHub Release 兜底。
       - name: Setup App Store Connect API Key
         run: |
           mkdir -p ~/private_keys
@@ -153,6 +226,11 @@ jobs:
             --apiKey "${{ secrets.APPLE_API_KEY_ID }}" \
             --apiIssuer "${{ secrets.APPLE_API_ISSUER_ID }}"
 
+      # ── Section: GitHub-release fallback ── only when the App Store upload failed, attach the
+      #    IPA/PKG to the version-tagged release so the signed artifact is never lost.
+      # 【中文】
+      # ── 本节:GitHub Release 兜底 ── 仅当 App Store 上传失败时,把 IPA/PKG 附到以版本号
+      #    打标的 Release,确保已签名产物不会丢失。
       - name: Upload to GitHub release (App Store upload failed)
         if: steps.publish.outcome == 'failure'
         uses: softprops/action-gh-release@v2
@@ -164,6 +242,10 @@ jobs:
           overwrite_files: true
           files: ${{ env.UPLOAD_FILE }}
 
+      # ── Section: API-key cleanup ── always()-guarded: deletes the ASC private key from the
+      #    runner regardless of upload outcome.
+      # 【中文】
+      # ── 本节:API 密钥清理 ── 由 always() 保护:无论上传成败,都从 runner 上删除 ASC 私钥。
       - name: Clean up API key
         if: always()
         run: rm -rf ~/private_keys

@@ -7,9 +7,24 @@
 # Note: secrets (PKCS12 keystore, Google service account) are decoded to disk on the runner — sensitive.
 #   Play upload is continue-on-error; the AAB only lands on the GitHub release when Play upload FAILS,
 #   whereas the APK is always attached to the release.
+# 【中文】
+# .github/workflows/build-android.yml —— 可复用工作流:构建并发布 Android 应用。
+# 系统角色: build.yml(本 12345APP CI 仓库)扇出调用的三个目标工作流之一。
+#   检出私有 APP12345 仓库(其中 vendored 提交了预编译的各 ABI librainbox.so),
+#   用 Flutter 构建已签名的 AAB 与通用 APK:AAB 上传 Google Play,APK 附到 GitHub Release。
+# 关键部分: workflow_call 输入 {name,pkg,version};步骤:Set build environment(推导 versionCode)、
+#   Setup Android signing、Build Android App Bundle and APK、Upload to Google Play Store、GitHub Release 上传。
+# 注意: 机密(PKCS12 密钥库、Google 服务账号)会被解码写到 runner 磁盘 —— 属敏感数据。
+#   Play 上传为 continue-on-error;只有当 Play 上传「失败」时 AAB 才会附到 GitHub Release,
+#   而 APK 则总是附到 Release。
 
 name: build-android
 
+# ── Section: Shared env & permissions ── GITHUB_TOKEN feeds the release-upload steps and
+#    PRIVATE_REPO names the private repo to check out; contents:write lets this job create releases.
+# 【中文】
+# ── 本节:共享环境变量与权限 ── GITHUB_TOKEN 供 Release 上传步骤使用,PRIVATE_REPO 指明要
+#    检出的私有仓库;contents:write 授权本任务创建 GitHub Release。
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
@@ -17,6 +32,11 @@ env:
 permissions:
   contents: write
 
+# ── Section: workflow_call trigger & inputs ── this is a REUSABLE workflow: build.yml invokes it,
+#    passing the app display name, the Android package id, and the version string to build/publish.
+# 【中文】
+# ── 本节:workflow_call 触发器与输入 ── 这是「可复用工作流」:由 build.yml 调用,
+#    传入应用显示名、Android 包名(pkg)以及要构建/发布的版本号。
 on:
   workflow_call:
     inputs:
@@ -33,16 +53,31 @@ on:
         type: string
         description: 'Version to build'
 
+# ── Section: build-android-app job ── the single Ubuntu job that runs the whole Android
+#    checkout → version → sign → build → publish pipeline, step by step below.
+# 【中文】
+# ── 本节:build-android-app 任务 ── 唯一的 Ubuntu 任务,依次完成整条
+#    Android 检出 → 版本号 → 签名 → 构建 → 发布流水线。
 jobs:
   build-android-app:
     runs-on: ubuntu-latest
     steps:
+      # ── Section: Source checkout ── pulls the PRIVATE APP12345 repo (app source + the vendored
+      #    prebuilt jniLibs/<abi>/librainbox.so binaries) using the cross-repo ORG_TOKEN.
+      # 【中文】
+      # ── 本节:源码检出 ── 用跨仓库的 ORG_TOKEN 检出私有 APP12345 仓库
+      #    (应用源码 + vendored 预编译的 jniLibs/<abi>/librainbox.so)。
       - name: Checkout private repository
         uses: actions/checkout@v6
         with:
           repository: ${{ env.PRIVATE_REPO }}
           token: ${{ secrets.ORG_TOKEN }}
 
+      # ── Section: Toolchain setup ── JDK 17 (required by Gradle/AGP), stable-channel Flutter,
+      #    and a pub-cache keyed on pubspec.lock so repeat builds skip dependency downloads.
+      # 【中文】
+      # ── 本节:工具链准备 ── 安装 JDK 17(Gradle/AGP 需要)与 stable 渠道 Flutter,
+      #    并按 pubspec.lock 缓存 pub 依赖,让重复构建免于重新下载。
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
@@ -65,6 +100,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pub-
 
+      # ── Section: Versioning ── derives the monotonic Android versionCode from the semver tag
+      #    (2.9.7 -> 297) and rewrites pubspec.yaml to X.Y.Z+BUILD so Flutter stamps
+      #    versionName + versionCode into the artifacts.
+      # 【中文】
+      # ── 本节:版本号处理 ── 由语义化版本推导单调递增的 Android versionCode(如 2.9.7 -> 297),
+      #    并把 pubspec.yaml 改写为 X.Y.Z+BUILD,让 Flutter 将 versionName + versionCode 写入产物。
       - name: Set build environment
         id: build-env
         run: |
@@ -78,6 +119,11 @@ jobs:
           sed -i "s/^version: .*/version: ${VERSION}+${BUILD_NUMBER}/" pubspec.yaml
           echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
 
+      # ── Section: Dependency resolution ── fetches pub packages (after the pubspec rewrite above)
+      #    and logs the Flutter version for build-log traceability.
+      # 【中文】
+      # ── 本节:依赖解析 ── 在上面改写 pubspec 之后拉取 pub 依赖包,
+      #    并打印 Flutter 版本以便在构建日志中追溯。
       - name: Install Flutter dependencies
         run: |
           flutter pub get
@@ -86,6 +132,12 @@ jobs:
         run: |
           flutter --version
 
+      # ── Section: Release signing ── decodes the PKCS12 keystore from secrets onto disk and
+      #    writes android/key.properties, which android/app/build.gradle.kts reads to sign the
+      #    release AAB/APK. Sensitive material lives on the runner from here on.
+      # 【中文】
+      # ── 本节:发布签名 ── 从 secrets 解码 PKCS12 密钥库写入磁盘,并生成 android/key.properties,
+      #    供 android/app/build.gradle.kts 读取以对 Release AAB/APK 签名。此后 runner 上存有敏感材料。
       - name: Setup Android signing
         run: |
           echo "${{ secrets.PKCS12_BASE64 }}" | base64 -d > android/app/${{ secrets.PKCS12_NAME }}-keystore.jks
@@ -96,6 +148,13 @@ jobs:
           storeFile=${{ secrets.PKCS12_NAME }}-keystore.jks
           EOF
 
+      # ── Section: Flutter build ── regenerates l10n + launcher icons, then produces BOTH release
+      #    artifacts (obfuscated, split debug info): the AAB destined for Google Play and a
+      #    universal APK for the GitHub release; each is renamed to a versioned filename.
+      # 【中文】
+      # ── 本节:Flutter 构建 ── 先重新生成 l10n 与启动图标,再构建两个 Release 产物
+      #    (启用混淆并拆分调试符号):送往 Google Play 的 AAB 和附到 GitHub Release 的
+      #    通用 APK,并各自重命名为带版本号的文件名。
       - name: Build Android App Bundle and APK
         run: |
           set -xeuo pipefail
@@ -120,6 +179,12 @@ jobs:
           mv build/app/outputs/flutter-apk/app-release.apk \
              "${{ inputs.name }}-android-universal-${{ inputs.version }}.apk"
 
+      # ── Section: Google Play publishing ── decodes the service-account JSON from secrets, then
+      #    uploads the AAB to the production track. continue-on-error: a Play outage or rejection
+      #    must not kill the release — the failure is caught by the fallback below.
+      # 【中文】
+      # ── 本节:Google Play 发布 ── 从 secrets 解码服务账号 JSON,再把 AAB 上传到 production
+      #    轨道。设为 continue-on-error:即使 Play 故障或拒收也不中断发布 —— 失败由下方兜底步骤接住。
       - name: Decode Google Play service account
         run: echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_BASE64 }}" | base64 -d > service-account.json
 
@@ -134,6 +199,12 @@ jobs:
           track: production
           status: completed
 
+      # ── Section: GitHub-release uploads ── the universal APK is ALWAYS attached to the
+      #    version-tagged release (direct-download channel); the AAB is attached only as a
+      #    fallback when the Play upload above failed, so the artifact is never lost.
+      # 【中文】
+      # ── 本节:GitHub Release 上传 ── 通用 APK 总是附到以版本号打标的 Release(直接下载渠道);
+      #    AAB 仅在上面的 Play 上传失败时作为兜底附上,确保产物不会丢失。
       - name: Upload APK to GitHub release
         uses: softprops/action-gh-release@v2
         with:
